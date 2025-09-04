@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PiP カウントダウン（大きめUI / 白アクセント）</title>
+  <style>
+    :root{
+      --bg-1: #071227;
+      --bg-2: #05263f;
+      --card-bg: rgba(255,255,255,0.04);
+      --accent: #ffffff; /* ポイントカラーを白に */
+      --accent-2: #f3f4f6;
+      --muted: rgba(255,255,255,0.75);
+    }
+    html,body{height:100%; margin:0; font-family:-apple-system, "Hiragino Kaku Gothic ProN", "Helvetica Neue", Arial; color:#fff;}
+    body{
+      display:flex; align-items:center; justify-content:center;
+      background: linear-gradient(160deg,var(--bg-1), var(--bg-2));
+      padding:20px;
+    }
+
+    .wrap{
+      width:380px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));
+      border-radius:16px;
+      box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+      padding:18px;
+      backdrop-filter: blur(6px);
+    }
+
+    .preview{
+      border-radius:12px;
+      overflow:hidden;
+      background: #04101a;
+      box-shadow: inset 0 -6px 20px rgba(0,0,0,0.6);
+      margin-bottom:12px;
+      position:relative;
+      height:200px; /* 見た目で高さ確保 */
+    }
+
+    /* canvas は内部解像度を高くしているので幅100% */
+    canvas{ display:block; width:100%; height:100%; }
+
+    .controls{
+      display:flex; gap:8px; align-items:center; justify-content:space-between;
+    }
+    .left{flex:1;}
+    label{font-size:13px; color:var(--muted); display:block; margin-bottom:6px;}
+    input[type="datetime-local"]{
+      width:100%;
+      padding:8px 10px;
+      border-radius:8px;
+      border: none;
+      background: rgba(255,255,255,0.03);
+      color:#fff;
+      font-size:14px;
+    }
+
+    .buttons{
+      display:flex; gap:8px; margin-top:10px;
+    }
+    button{
+      flex:1;
+      padding:10px 12px;
+      border-radius:10px;
+      border:none;
+      font-weight:700;
+      cursor:pointer;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color:#012; /* 白ボタンに合わせて濃い文字 */
+      box-shadow:0 6px 16px rgba(2,6,23,0.45);
+      font-size:15px;
+    }
+    button.ghost{
+      background:transparent;
+      border:1px solid rgba(255,255,255,0.08);
+      color:var(--muted);
+      box-shadow:none;
+      font-weight:600;
+    }
+    .note{font-size:12px;color:rgba(255,255,255,0.6); margin-top:8px; text-align:center;}
+    .small{font-size:12px;color:rgba(255,255,255,0.6); margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div class="wrap" role="region" aria-label="カウントダウン設定">
+    <div class="preview" aria-hidden="false">
+      <!-- 高解像度キャンバス（PiP 表示の主役） -->
+      <canvas id="canvas" width="1280" height="720" aria-label="カウントダウン表示"></canvas>
+    </div>
+
+    <div class="controls">
+      <div class="left">
+        <label for="target">終了日時（デフォルト：現在時刻）</label>
+        <input id="target" type="datetime-local" aria-describedby="desc" />
+      </div>
+    </div>
+
+    <div class="buttons">
+      <button id="start">Start</button>
+      <button id="stop" class="ghost" style="display:none;">Stop</button>
+    </div>
+
+    <div class="note" id="desc">Safariで開いて「Start」を押すと PiP が開始されます（ミュート）。</div>
+    <div class="small">※ ホーム画面のスタンドアロン（PWA）では PiP に制限がある場合があります</div>
+  </div>
+
+  <!-- 非表示ビデオ（canvas を流す先） -->
+  <video id="v" playsinline muted style="display:none;"></video>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const video = document.getElementById('v');
+    const startBtn = document.getElementById('start');
+    const stopBtn = document.getElementById('stop');
+    const targetInput = document.getElementById('target');
+
+    // ベース表示サイズ（CSSピクセルでのロジカルサイズ）
+    const BASE_W = 1280;
+    const BASE_H = 720;
+
+    // 高DPI対応：内部解像度を devicePixelRatio に合わせる
+    function setCanvasDPR() {
+      const dpr = window.devicePixelRatio || 1;
+      // 内部ピクセル数を増やす（PiP の画質向上に寄与）
+      canvas.width = BASE_W * dpr;
+      canvas.height = BASE_H * dpr;
+      // 見た目のサイズは CSS 側でコントロール（preview の高さに合わせる）
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      // transform を設定して 1 CSS px = 1 単位 になるように
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    setCanvasDPR();
+    window.addEventListener('resize', () => {
+      setCanvasDPR();
+    });
+
+    // デフォルト終了時刻を現在時刻に
+    function toLocalDatetimeInputValue(date) {
+      const pad = n => String(n).padStart(2,'0');
+      const y = date.getFullYear();
+      const m = pad(date.getMonth() + 1);
+      const d = pad(date.getDate());
+      const hh = pad(date.getHours());
+      const mm = pad(date.getMinutes());
+      return `${y}-${m}-${d}T${hh}:${mm}`;
+    }
+    targetInput.value = toLocalDatetimeInputValue(new Date());
+
+    // 描画ループと表示設定（表示要素を大きく）
+    let rafId = null;
+    function formatRemaining(ms) {
+      if (ms <= 0) return "00:00:00";
+      const s = Math.floor(ms/1000) % 60;
+      const m = Math.floor(ms/60000) % 60;
+      const h = Math.floor(ms/3600000);
+      return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+    }
+
+    function draw(remMs) {
+      // ロジカル（CSS）サイズ
+      const w = BASE_W;
+      const h = BASE_H;
+
+      // 背景グラデ
+      const grad = ctx.createLinearGradient(0,0,w, h);
+      grad.addColorStop(0, '#041426');
+      grad.addColorStop(1, '#05263f');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0,0,w,h);
+
+      // 大きなタイマー（さらに大きく）
+      const timeText = formatRemaining(remMs);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 180px -apple-system, "Helvetica Neue", Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(timeText, w/2, h/2 - 10);
+
+      // サブテキスト（少し小さめ）
+      ctx.font = '18px -apple-system, "Helvetica Neue", Arial';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      const status = remMs > 0 ? '残り時間' : '終了しました';
+      ctx.fillText(status, w/2, h/2 + 70);
+
+      // ターゲット時刻（小さく右上）
+      ctx.font = '14px -apple-system, "Helvetica Neue", Arial';
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      const targetDate = new Date(targetInput.value);
+      if (!isNaN(targetDate)) {
+        const local = targetDate.toLocaleString([], {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+        ctx.fillText('終了: ' + local, w - 18 - (ctx.measureText('終了: ' + local).width/1), 28);
+      }
+
+      // 進捗リング（下部、より大きく見やすく）
+      const totalMs = Math.max(1, Math.abs(new Date(targetInput.value) - new Date()));
+      const elapsed = Math.max(0, Math.min(totalMs, totalMs - remMs));
+      const progress = remMs <= 0 ? 1 : (elapsed / totalMs);
+      const centerX = w/2;
+      const centerY = h - 110;
+      const radius = 90;
+
+      // 背景リング
+      ctx.beginPath();
+      ctx.lineWidth = 12;
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // 進捗アーク（白系のグラデ）
+      const startAng = -Math.PI / 2;
+      const endAng = startAng + Math.PI * 2 * progress;
+      ctx.beginPath();
+      ctx.lineWidth = 14;
+      const g = ctx.createLinearGradient(centerX - radius, centerY - radius, centerX + radius, centerY + radius);
+      g.addColorStop(0, '#ffffff');
+      g.addColorStop(1, '#f3f4f6');
+      ctx.strokeStyle = g;
+      ctx.lineCap = 'round';
+      ctx.arc(centerX, centerY, radius, startAng, endAng);
+      ctx.stroke();
+
+      // 進捗 % を中央に大きめに表示（読みやすさ重視）
+      ctx.font = '20px -apple-system, "Helvetica Neue", Arial';
+      ctx.fillStyle = 'rgba(0,0,0,0.85)'; // 白のリング上に濃い文字
+      const pct = Math.round(progress * 100);
+      const pctText = (remMs <= 0 ? 100 : pct) + '%';
+      ctx.fillText(pctText, centerX, centerY + 8);
+    }
+
+    function drawLoop() {
+      const target = new Date(targetInput.value);
+      const now = new Date();
+      const rem = Math.max(0, target - now);
+      draw(rem);
+      rafId = requestAnimationFrame(drawLoop);
+    }
+
+    // PiP 管理
+    let pipActive = false;
+    let streamRef = null;
+
+    async function startPiP() {
+      // canvas -> stream
+      const stream = canvas.captureStream(30);
+      streamRef = stream;
+      video.srcObject = stream;
+      try { await video.play().catch(()=>{}); } catch(e){ /* ignore */ }
+
+      try {
+        if (typeof video.requestPictureInPicture === 'function') {
+          await video.requestPictureInPicture();
+        } else if (typeof video.webkitSupportsPresentationMode === 'function' && video.webkitSupportsPresentationMode('picture-in-picture')) {
+          video.webkitSetPresentationMode('picture-in-picture');
+        } else {
+          alert('この環境では PiP を開始できません。Safariで開いているか確認してください。');
+          stopStreamTracks();
+          return;
+        }
+      } catch (err) {
+        console.error('PiP failed', err);
+        alert('PiP の開始に失敗しました: ' + (err && err.message ? err.message : String(err)));
+        stopStreamTracks();
+        return;
+      }
+
+      pipActive = true;
+      startBtn.style.display = 'none';
+      stopBtn.style.display = '';
+      document.getElementById('desc').textContent = 'PiP が開始されました。ウィンドウを移動して他の操作を続けられます。';
+    }
+
+    function stopStreamTracks() {
+      if (streamRef) {
+        const t = streamRef.getTracks();
+        if (t && t.length) t.forEach(tr => tr.stop());
+      }
+      video.srcObject = null;
+      streamRef = null;
+    }
+
+    async function stopPiP() {
+      try {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture();
+        }
+        if (typeof video.webkitSetPresentationMode === 'function') {
+          video.webkitSetPresentationMode('inline');
+        }
+      } catch (e) {
+        console.warn('PiP stop error', e);
+      } finally {
+        stopStreamTracks();
+        pipActive = false;
+        startBtn.style.display = '';
+        stopBtn.style.display = 'none';
+        document.getElementById('desc').textContent = 'PiP を停止しました。必要なら再度 Start を押してください。';
+      }
+    }
+
+    // イベント処理
+    video.addEventListener('leavepictureinpicture', () => stopPiP());
+    video.addEventListener('webkitpresentationmodechanged', () => {
+      if (video.webkitPresentationMode === 'inline') stopPiP();
+    });
+
+    startBtn.addEventListener('click', async () => {
+      if (!rafId) drawLoop();
+      await startPiP();
+    });
+    stopBtn.addEventListener('click', async () => {
+      await stopPiP();
+    });
+
+    // 初期描画開始
+    if (!rafId) drawLoop();
+
+    // Enter で Start（アクセシビリティ）
+    targetInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') startBtn.click();
+    });
+
+    // orientation 変化時に DPI 更新
+    window.addEventListener('orientationchange', () => {
+      setTimeout(setCanvasDPR, 300);
+    });
+  </script>
+</body>
+</html>
